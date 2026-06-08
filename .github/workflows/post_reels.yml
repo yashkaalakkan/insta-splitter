@@ -1,0 +1,113 @@
+name: Instagram Video Pipeline
+
+on:
+  # Trigger manually from GitHub Actions UI, or via API
+  workflow_dispatch:
+    inputs:
+      file_id:
+        description: "Google Drive File ID (the long string from the shareable link)"
+        required: true
+      cover_image_id:
+        description: "Google Drive File ID of the cover/thumbnail image"
+        required: true
+      base_caption:
+        description: "Caption for this episode"
+        required: true
+      start_time:
+        description: "Start cutting from this time in seconds (e.g. 810 to skip first 9 clips)"
+        required: false
+        default: "0"
+      end_time:
+        description: "Stop cutting at this time in seconds (0 = until end of video)"
+        required: false
+        default: "0"
+      start_part:
+        description: "Which part number to start from (e.g. 4 for second episode)"
+        required: false
+        default: "1"
+      audio_track:
+        description: "Audio track index (0 = first/Japanese, 1 = second/English)"
+        required: false
+        default: "1"
+
+jobs:
+  post-reels:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg --fix-missing --ignore-missing
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Download input video
+        run: |
+          FILE_ID="${{ github.event.inputs.file_id }}"
+          pip install gdown
+          gdown "https://drive.google.com/uc?id=${FILE_ID}&confirm=t" -O input_video.mkv
+          if [ $(stat -c%s input_video.mkv) -lt 1000000 ]; then
+            echo "❌ File too small - likely downloaded HTML instead of video!"
+            cat input_video.mkv
+            exit 1
+          fi
+          echo "✅ Video downloaded successfully"
+      
+      - name: Download cover image
+        run: |
+          gdown "https://drive.google.com/uc?id=${{ github.event.inputs.cover_image_id }}" -O cover.jpg
+
+      - name: Write config
+        run: |
+          python - <<'PYEOF'
+          import json
+          config = {
+            "instagram_username": "${{ secrets.INSTAGRAM_USERNAME }}",
+            "instagram_password": "${{ secrets.INSTAGRAM_PASSWORD }}",
+            "clip_duration": 100,
+            "start_time": ${{ github.event.inputs.start_time }},
+            "end_time": ${{ github.event.inputs.end_time }},
+            "start_part": ${{ github.event.inputs.start_part }},
+            "post_delay": 1200,
+            "caption_template": "Part {n} 🎬 Follow @${{ secrets.INSTAGRAM_USERNAME }} for more!\n\n{base_caption}\n\n#reels #part{n}",
+            "base_caption": ${{ toJSON(github.event.inputs.base_caption) }},
+            "font_size": 72,
+            "audio_track": ${{ github.event.inputs.audio_track }},
+            "font_color": "white",
+            "cover_image": "cover.jpg",
+            "font_outline_color": "black",
+            "text_position": "bottom",
+            "output_dir": "output",
+            "clips_dir": "clips"
+          }
+          with open("config.json", "w") as f:
+            json.dump(config, f, indent=2)
+          print("Config written successfully!")
+          PYEOF
+        
+      - name: Load Instagram session
+        run: |
+          cat > session.json <<'EOF'
+          ${{ secrets.INSTAGRAM_SESSION }}
+          EOF
+
+      - name: Run pipeline
+        run: python splitter.py run input_video.mkv
+
+      - name: Upload processed clips as artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: processed-clips
+          path: output/
+          retention-days: 3

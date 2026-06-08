@@ -1,0 +1,9 @@
+config.json
+.session_*.json
+clips/
+output/
+*.mp4
+*.mov
+*.avi
+__pycache__/
+*.pyc
